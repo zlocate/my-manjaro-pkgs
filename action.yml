@@ -11,6 +11,14 @@ inputs:
   gpg_keyid:
     description: 'additional trustworthy gpg key id'
     required: false
+  sign_pkg:
+    description: 'enable pkg signing'
+    default: "false"
+    required: false
+  dispatch:
+    description: 'enable dispatching'
+    default: "false"
+    required: false
   gpg_signing_key_base64:
     description: 'base64 encoded signing-key'
     required: true
@@ -32,7 +40,7 @@ outputs:
     value: ${{ steps.filename.outputs.name }}
 
 runs:
-  using: "composite"
+  using: "composite"  
   steps:
     - id: info
       shell: bash
@@ -71,17 +79,20 @@ runs:
           --volume "${PWD}/artifacts:/artifacts"
           --volume "${PWD}/build:/build:cached"
           --cap-add=SYS_ADMIN
+          --env SIGN_PKG=${{env.SIGN_PKG}}
           --security-opt seccomp=unconfined
         shell: /bin/sh
         install: |
-          echo ${{ inputs.gpg_keyid }} >>additional_gpg
-          for key in "$(cat additional_gpg)";do
-            sudo -u builder gpg --keyserver keys.openpgp.org --recv-key $key
-          done
-          sudo -u builder gpg --keyserver keys.openpgp.org --recv-key ${{ inputs.gpg_keyid }}
-          pacman-key --keyserver keys.openpgp.org --recv-keys ${{ inputs.gpg_keyid }}
+          echo ${{ inputs.sign_pkg }}
+          if [[ ${{ inputs.sign_pkg }} == "true" ]]; then
+            echo ${{ inputs.gpg_keyid }} >>additional_gpg
+            for key in "$(cat additional_gpg)";do
+              sudo -u builder gpg --keyserver keys.openpgp.org --recv-key $key
+            done
+            sudo -u builder gpg --keyserver keys.openpgp.org --recv-key ${{ inputs.gpg_keyid }}
+            pacman-key --keyserver keys.openpgp.org --recv-keys ${{ inputs.gpg_keyid }}
+          fi
 
-          sed -i '/^\[core\]/i \[manjaro-sway\]\nSigLevel = Optional TrustAll\nServer = https://packages.manjaro-sway.download/$arch\n' /etc/pacman.conf
           pacman-mirrors --geoip
           sudo pacman -Sy --noconfirm --needed base-devel
         run: |
@@ -103,7 +114,7 @@ runs:
         echo "::set-output name=name::$(basename $(find ./artifacts/ -type f  \( -name "*.pkg.tar.zst" \)))"
     - name: sign
       shell: bash
-      if: ${{ env.BUILD == 'true' }}
+      if: ${{ env.BUILD == 'true' && env.SIGN_PKG == 'true' }}
       run: |
         # import signing key (no passphrase)
         cat <(echo -e "${{ inputs.gpg_signing_key_base64 }}" | base64 --decode) | gpg --batch --import
@@ -115,9 +126,9 @@ runs:
           echo ${{ github.token }} | gh auth login --with-token
           gh release create ${{ steps.info.outputs.version }} --repo ${{ github.repository }} --notes "automated release" || echo "release already exists"
           gh release upload ${{ steps.info.outputs.version }} --repo ${{ github.repository }} --clobber \
-            ./artifacts/${{ steps.filename.outputs.name }} ./artifacts/${{ steps.filename.outputs.name }}.sig
+            ./artifacts/${{ steps.filename.outputs.name }}*
     - name: dispatch
-      if: ${{ env.BUILD == 'true' }}
+      if: ${{ env.BUILD == 'true' && inputs.dispatch == 'true' }}
       uses: peter-evans/repository-dispatch@v2
       with:
         token: ${{ inputs.dispatch-token }}
