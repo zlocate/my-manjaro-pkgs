@@ -1,0 +1,126 @@
+name: 'Manjaro package action'
+description: 'builds packages for Manjaro'
+
+inputs:
+  docker_arch:
+    description: 'amd64|aarch64'
+    required: true
+  archlinux_arch:
+    description: 'any|aarch64|x86_64'
+    required: true
+  gpg_keyid:
+    description: 'additional trustworthy gpg key id'
+    required: false
+  gpg_signing_key_base64:
+    description: 'base64 encoded signing-key'
+    required: true
+  pkgbuild:
+    description: 'path of the PKGBUILD file'
+    default: "PKGBUILD"
+    required: false
+  force-update:
+    description: force action to build, even if version tag exists
+    default: "false"
+    required: false
+  dispatch-token:
+    description: token required for dispatch to Manjaro-Sway/packages
+    required: true
+
+outputs:
+  filename:
+    description: "name of the result file"
+    value: ${{ steps.filename.outputs.name }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: info
+      shell: bash
+      run: |
+        echo "::set-output name=archs::$(cat ${{ inputs.pkgbuild }} | grep ^arch= | sed -e 's/^arch=(\(.*\))/\1/')"
+        VERSION=$(cat ${{ inputs.pkgbuild }} | grep ^pkgver= | sed -e 's/^pkgver=//' | awk '{print $1}')-$(cat ${{ inputs.pkgbuild }} | grep ^pkgrel= | sed -e 's/^pkgrel=//' | awk '{print $1}')
+        echo "::set-output name=version::${VERSION}"
+    - name: x86_64-build
+      shell: bash
+      if: ${{ ( contains(steps.info.outputs.archs, 'any') && inputs.archlinux_arch == 'x86_64' ) }}
+      run: echo "BUILD=true" >>$GITHUB_ENV
+    - name: aarch64-build
+      shell: bash
+      if: ${{ contains(steps.info.outputs.archs, inputs.archlinux_arch) }}
+      run: echo "BUILD=true" >>$GITHUB_ENV
+    - name: check updatable
+      if: ${{ env.BUILD == 'true' }}
+      shell: bash
+      run: |
+        git fetch --tags
+        git rev-list "${{ steps.info.outputs.version }}" >/dev/null && \
+          echo "BUILD=${{ inputs.force-update }}" >>$GITHUB_ENV || \
+          echo "BUILD=true" >>$GITHUB_ENV
+    - uses: Manjaro-Sway/run-on-arch-action@master
+      if: ${{ env.BUILD == 'true' }}
+      name: build
+      id: build
+      with:
+        arch: ${{ inputs.docker_arch }}
+        distro: manjaro_latest
+        githubToken: ${{ github.token }}
+        setup: |
+          mkdir -p "${PWD}/artifacts"
+          mkdir -p "${PWD}/build"
+        dockerRunArgs: |
+          --volume "${PWD}/artifacts:/artifacts"
+          --volume "${PWD}/build:/build:cached"
+          --cap-add=SYS_ADMIN
+          --security-opt seccomp=unconfined
+        shell: /bin/sh
+        install: |
+          echo ${{ inputs.gpg_keyid }} >>additional_gpg
+          for key in "$(cat additional_gpg)";do
+            sudo -u builder gpg --keyserver keys.openpgp.org --recv-key $key
+          done
+          sudo -u builder gpg --keyserver keys.openpgp.org --recv-key ${{ inputs.gpg_keyid }}
+          pacman-key --keyserver keys.openpgp.org --recv-keys ${{ inputs.gpg_keyid }}
+
+          sed -i '/^\[core\]/i \[manjaro-sway\]\nSigLevel = Optional TrustAll\nServer = https://packages.manjaro-sway.download/$arch\n' /etc/pacman.conf
+          pacman-mirrors --geoip
+          sudo pacman -Sy --noconfirm --needed base-devel
+        run: |
+          pacman -Syy
+          case "${{ inputs.docker_arch }}" in
+            amd64)
+              pacman --noconfirm -U https://archlinux.org/packages/extra/x86_64/cmake/download
+              ;;
+            aarch64)
+              ;;
+          esac
+          chown builder $PWD
+          sudo -u builder makepkg -fsAc --noconfirm --noprogressbar -p ${{ inputs.pkgbuild }}
+          cp *.pkg.tar.zst* /artifacts/
+    - id: filename
+      shell: bash
+      if: ${{ env.BUILD == 'true' }}
+      run: |
+        echo "::set-output name=name::$(basename $(find ./artifacts/ -type f  \( -name "*.pkg.tar.zst" \)))"
+    - name: sign
+      shell: bash
+      if: ${{ env.BUILD == 'true' }}
+      run: |
+        # import signing key (no passphrase)
+        cat <(echo -e "${{ inputs.gpg_signing_key_base64 }}" | base64 --decode) | gpg --batch --import
+        gpg --pinentry-mode loopback --detach-sign ./artifacts/${{ steps.filename.outputs.name }}
+    - name: release
+      shell: bash
+      if: ${{ env.BUILD == 'true' }}
+      run: |
+          echo ${{ github.token }} | gh auth login --with-token
+          gh release create ${{ steps.info.outputs.version }} --repo ${{ github.repository }} --notes "automated release" || echo "release already exists"
+          gh release upload ${{ steps.info.outputs.version }} --repo ${{ github.repository }} --clobber \
+            ./artifacts/${{ steps.filename.outputs.name }} ./artifacts/${{ steps.filename.outputs.name }}.sig
+    - name: dispatch
+      if: ${{ env.BUILD == 'true' }}
+      uses: peter-evans/repository-dispatch@v2
+      with:
+        token: ${{ inputs.dispatch-token }}
+        repository: manjaro-sway/packages
+        event-type: package_update
+        client-payload: '{ "repository": "${{ github.repository }}", "version": "${{ steps.info.outputs.version }}", "file_name": "${{ steps.filename.outputs.name }}"}'

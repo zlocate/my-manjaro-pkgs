@@ -1,0 +1,21 @@
+pkgname=dummy
+pkgrel=1
+pkgver=1.0.0
+pkgdesc="Dummy Package"
+url="https://www.github.com/dummy/dummy"
+depends=('python-pip')
+makedepends=('python-setuptools')
+conflicts=('dummy')
+provides=('dummy')
+license=('GPL')
+arch=('x86_64' 'aarch64')
+
+build() {
+    echo "build"
+    sleep 1
+}
+
+package() {
+    echo "package"
+    sleep 1
+}

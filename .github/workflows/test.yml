@@ -1,0 +1,33 @@
+name: 'build-test'
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-release:
+    runs-on: ubuntu-20.04
+    strategy:
+      matrix:
+        pkgbuild: ["PKGBUILD.any", "PKGBUILD.multi"]
+        archlinux_arch: [aarch64, x86_64]
+        include:
+          - archlinux_arch: aarch64
+            docker_arch: aarch64
+          - archlinux_arch: x86_64
+            docker_arch: amd64
+    steps:
+      - name: check out repo for action code
+        uses: actions/checkout@v3
+      - name: pkgbuild
+        uses: ./
+        with:
+          docker_arch: ${{ matrix.docker_arch }}
+          archlinux_arch: ${{ matrix.archlinux_arch }}
+          gpg_keyid: ${{ secrets.GPG_KEYID }}
+          gpg_signing_key_base64: ${{ secrets.GPG_SECRET_KEY_BASE64 }}
+          pkgbuild: ${{ matrix.pkgbuild }}
+          dispatch-token: ${{ secrets.DISPATCH }}
+          force-update: true
